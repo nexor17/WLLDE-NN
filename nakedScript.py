@@ -3,8 +3,7 @@ import os
 from re import X
 import numpy as np
 import matplotlib.pyplot as plt
-# Load open, high, low, and close prices from the CSV
-input_csv = 'data/GSPC.csv'
+input_csv = 'data/SI=F.csv'
 open_prices, high_prices, low_prices, y = np.loadtxt(
     input_csv, delimiter=',', unpack=True, skiprows=1, usecols=(1, 2, 3, 4)
 )
@@ -37,22 +36,18 @@ yMat = np.matrix(y)
 tua = 0.9
 yPred = lwr(xCon, yMat.T, tua)
 
-# Combine all data columns for the output CSV
 output_data = np.vstack([x, open_prices, high_prices, low_prices, y, yPred]).T
 
-# Define output directory and filename
-output_dir = '/optidata'
+output_dir = 'optidata'
 base_filename = os.path.splitext(os.path.basename(input_csv))[0]
-output_filename = f'{base_filename}Optimized.csv'
+output_filename = f'{base_filename}_opti.csv'
 output_path = os.path.join(output_dir, output_filename)
 
-# Create directory if it doesn't exist
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
-# Save the combined data to the new CSV file
 header = 'dayoftheyear,open,high,low,close,WLLDE'
-np.savetxt(output_path, output_data, delimiter=',', header=header, comments='')
+np.savetxt(output_path, output_data, delimiter=',', header=header, comments='', fmt=['%d', '%.2f', '%.2f', '%.2f', '%.2f', '%.2f'])
 
 #plt.scatter(x, y)
 #plt.plot(x, yPred)
