@@ -14,7 +14,7 @@ from sklearn.model_selection import train_test_split
 import os
 import glob
 
-# Hyperparameters - OPTIMIZED FOR ACCURACY
+# Hyperparameters
 LEARNING_RATE = 0.0005 
 EPOCHS = 300 
 BATCH_SIZE = 128 
@@ -25,6 +25,7 @@ N_MODELS = 7
 PREDICTION_DAYS = 2 
 MIN_CONFIDENCE = 0.53 
 
+# Portfolio Management
 INITIAL_CAPITAL = 100000
 MAX_POSITION_SIZE = 0.65 
 MAX_TOTAL_EXPOSURE = 2.5 
@@ -37,12 +38,15 @@ COMPOUND_RETURNS = True
 KELLY_MULTIPLIER = 1.7 
 MIN_POSITION_SIZE = 0.08 
 
+# check to use amd gpu
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-
+# Model
 class PricePredictor(nn.Module):
+    # LSTM with attention
     def __init__(self, input_size, dropout=0.3, hidden_size=256):
+        # Initialize the model
         super(PricePredictor, self).__init__()
         
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, 
@@ -50,18 +54,20 @@ class PricePredictor(nn.Module):
         
         self.attention = nn.Linear(hidden_size, 1)
         
+        # Fully connected layers
         self.fc1 = nn.Linear(hidden_size, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 64)
         self.fc4 = nn.Linear(64, 1)
         
+        # Activation functions and dropout
         self.relu = nn.ReLU()
         self.leaky_relu = nn.LeakyReLU(0.1)
         self.dropout = nn.Dropout(dropout)
         self.batch_norm1 = nn.BatchNorm1d(256)
         self.batch_norm2 = nn.BatchNorm1d(128)
         self.batch_norm3 = nn.BatchNorm1d(64)
-        
+    # Forward pass 
     def forward(self, x):
         if len(x.shape) == 2:
             x = x.unsqueeze(1)  
@@ -87,7 +93,10 @@ class PricePredictor(nn.Module):
         x = self.fc4(x)
         return x
 
+# Data Loading
 def load_data(data_folder='optidata'):
+    
+    # Load data from CSV files
     csv_files = glob.glob(os.path.join(data_folder, '*_opti.csv'))
     if not csv_files:
         csv_files = glob.glob(os.path.join(data_folder, '*Optimized.csv'))
@@ -97,6 +106,7 @@ def load_data(data_folder='optidata'):
     
     print(f"Found {len(csv_files)} file(s)")
     
+    # Load data from CSV files
     all_data = []
     for csv_file in csv_files:
         df = pd.read_csv(csv_file)
@@ -106,7 +116,9 @@ def load_data(data_folder='optidata'):
     data = pd.concat(all_data, ignore_index=True)
     return data, csv_files
 
+# Data Preparation
 def prepare_data(data, prediction_days=3):
+    # Feature columns
     feature_columns = ['dayoftheyear', 'open', 'high', 'low', 'close', 'WLLDE']
     
     # Technical indicators
@@ -153,12 +165,14 @@ def prepare_data(data, prediction_days=3):
     data.fillna(method='bfill', inplace=True)
     data.fillna(0, inplace=True)
     
+    # Extended features
     extended_features = feature_columns + ['pct_change', 'high_low_range', 'open_close_diff', 
                                            'price_momentum', 'close_ma3', 'close_ma7', 'close_ma14', 'close_ma21',
                                            'rsi', 'macd', 'macd_signal', 'macd_hist',
                                            'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_position',
                                            'volatility', 'volatility_ratio', 'dist_from_ma7', 'dist_from_ma14']
     
+    # Features and labels
     X = data[extended_features].values[:-prediction_days]
     current_close = data['close'].values[:-prediction_days]
     future_close = data['close'].values[prediction_days:]
@@ -170,25 +184,32 @@ def prepare_data(data, prediction_days=3):
     
     return X, y, current_close, future_prices.flatten()
 
+# Model Training
 def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, symbol):
+    # Convert to tensors
     X_train_tensor = torch.FloatTensor(X_train)
     y_train_tensor = torch.FloatTensor(y_train)
     X_val_tensor = torch.FloatTensor(X_val)
     y_val_tensor = torch.FloatTensor(y_val)
     
+    # Create datasets
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     
+    # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
+    # Initialize model
     model = PricePredictor(input_size=X_train.shape[1], dropout=DROPOUT).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
+    # Initialize scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', 
                                                       factor=0.5, patience=15, verbose=False)
     
+    # Initialize variables
     best_val_loss = float('inf')
     best_val_acc = 0
     patience_counter = 0
@@ -196,6 +217,7 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
     
     print(f"\nTraining Model {model_id + 1}/{N_MODELS}...")
     
+    # Training loop
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0.0
@@ -242,9 +264,11 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
         
         scheduler.step(val_loss)
         
+        # Print progress
         if (epoch + 1) % 30 == 0:
             print(f"  Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
         
+        # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_val_loss = val_loss
@@ -259,8 +283,10 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     
+    # Print final accuracy
     print(f"  Final Model Validation Accuracy: {best_val_acc:.2f}%")
     
+    # Save model
     model_path = f'models/{symbol}/model_{model_id + 1}.pth'
     os.makedirs(f'models/{symbol}', exist_ok=True)
     torch.save({
@@ -271,9 +297,12 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
     
     return model
 
+# Ensemble prediction
 def ensemble_predict(models, X_test):
+    # Convert to tensor
     X_test_tensor = torch.FloatTensor(X_test).to(device)
     
+    # Get predictions
     all_predictions = []
     for model in models:
         model.eval()
@@ -285,6 +314,7 @@ def ensemble_predict(models, X_test):
     ensemble_probs = np.mean(all_predictions, axis=0)
     return ensemble_probs
 
+# Kelly Criterion position sizing
 def kelly_criterion(win_prob, win_loss_ratio, max_fraction=0.60, multiplier=1.5):
     """Calculate optimal position size using Kelly Criterion with multiplier"""
     lose_prob = 1 - win_prob
@@ -292,9 +322,10 @@ def kelly_criterion(win_prob, win_loss_ratio, max_fraction=0.60, multiplier=1.5)
     kelly_fraction *= multiplier
     return max(0, min(kelly_fraction, max_fraction))
 
+# Backtest strategy
 def backtest_strategy(predictions, confidence, current_prices, future_prices, prediction_days):
     """
-    Aggressive multi-position strategy with leverage and compounding
+    multi-position strategy with leverage and compounding
     """
     capital = INITIAL_CAPITAL
     positions = [] 
@@ -305,13 +336,16 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
     
     max_len = min(len(predictions), len(current_prices), len(future_prices))
     
+    # Backtest
     for i in range(max_len):
         if i == 0:
             continue
-            
+        
+        # Get current price and prediction
         current_price = current_prices[i]
         pred_prob = predictions[i]
         
+        # Update positions
         new_positions = []
         for pos in positions:
             pnl_pct = (current_price - pos['entry']) / pos['entry'] * pos['direction']
@@ -319,6 +353,7 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
             close_position = False
             exit_type = None
             
+            # Check for trailing stop
             if TRAILING_STOP and pnl_pct > TRAILING_STOP_PCT:
                 if pnl_pct < pos['max_profit'] - TRAILING_STOP_PCT:
                     close_position = True
@@ -326,9 +361,12 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
                 else:
                     pos['max_profit'] = max(pos['max_profit'], pnl_pct)
             
+            # Check for stop loss
             if pnl_pct <= -STOP_LOSS_PCT:
                 close_position = True
                 exit_type = 'stop_loss'
+            
+            # Check for take profit
             elif pnl_pct >= TAKE_PROFIT_PCT:
                 close_position = True
                 exit_type = 'take_profit'
@@ -336,13 +374,15 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
                 close_position = True
                 exit_type = 'time_exit'
             
+            # Close position
             if close_position:
                 pnl = pos['size'] * pnl_pct
                 if COMPOUND_RETURNS:
-                    capital += pnl  # Compound the gains
+                    capital += pnl 
                 else:
                     capital += pnl
                 
+                # Add trade to history
                 trades.append({
                     'entry': pos['entry'],
                     'exit': current_price,
@@ -357,12 +397,19 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
         
         positions = new_positions
         
+        # Update equity curve
+        equity_curve.append(capital)
+        
+        
+        # Update total exposure
         total_exposure = sum(p['size'] for p in positions) / capital if capital > 0 else 0
         
+        # Check for leverage
         if capital > 0 and total_exposure < MAX_TOTAL_EXPOSURE:
             should_trade = False
             direction = 0
             
+            # Check for confidence
             if pred_prob >= MIN_CONFIDENCE:
                 direction = 1
                 should_trade = True
@@ -370,9 +417,11 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
                 direction = -1
                 should_trade = True
             
+            # Check for trade
             if should_trade:
                 available_capital = capital * MAX_TOTAL_EXPOSURE - sum(p['size'] for p in positions)
                 
+                # Check for Kelly Criterion
                 if USE_KELLY:
                     win_loss_ratio = TAKE_PROFIT_PCT / STOP_LOSS_PCT
                     effective_prob = pred_prob if direction == 1 else (1 - pred_prob)
@@ -381,6 +430,7 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
                 else:
                     position_size = min(capital * MAX_POSITION_SIZE, available_capital)
                 
+                # Check for position size
                 if position_size > capital * 0.05: 
                     positions.append({
                         'entry': current_price,
@@ -390,22 +440,27 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
                         'max_profit': 0
                     })
         
+        # Calculate open P&L
         open_pnl = sum(p['size'] * ((current_price - p['entry']) / p['entry'] * p['direction']) for p in positions)
         current_equity = capital + open_pnl
         equity_curve.append(current_equity)
         
+        # Calculate daily returns
         if len(equity_curve) > 1:
             daily_return = (equity_curve[-1] - equity_curve[-2]) / equity_curve[-2]
             daily_returns.append(daily_return)
         
+        # Update peak equity
         peak_equity = max(peak_equity, current_equity)
     
     return trades, equity_curve, daily_returns
 
+# Calculate metrics
 def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_returns=None):
     """Calculate performance metrics including Sharpe Ratio, Alpha, and Beta"""
     equity_curve = np.array(equity_curve)
     
+    # Calculate metrics
     if len(trades) == 0:
         return {
             'total_trades': 0,
@@ -418,11 +473,13 @@ def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_return
             'alpha': 0,
             'beta': 0
         }
-    
+
+    # Calculate total profit and win rate
     total_profit = sum(t['profit'] for t in trades)
     winning_trades = [t for t in trades if t['profit'] > 0]
     win_rate = len(winning_trades) / len(trades) * 100
-    
+
+    # Calculate Sharpe Ratio
     equity_curve = np.array(equity_curve)
     if daily_returns is None:
         returns = np.diff(equity_curve) / equity_curve[:-1]
@@ -434,16 +491,19 @@ def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_return
     else:
         sharpe_ratio = 0
     
+    # Calculate CAGR
     years = len(equity_curve) / 252
     if years > 0:
         cagr = (equity_curve[-1] / equity_curve[0]) ** (1 / years) - 1
     else:
         cagr = 0
     
+    # Calculate max drawdown
     peak = np.maximum.accumulate(equity_curve)
     drawdown = (equity_curve - peak) / peak
     max_drawdown = np.min(drawdown) * 100
     
+    # Calculate return percentage
     return_pct = (equity_curve[-1] - equity_curve[0]) / equity_curve[0] * 100
     
     # Calculate Alpha and Beta relative to benchmark
@@ -457,6 +517,7 @@ def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_return
         strat_returns = returns[:min_len]
         bench_returns = benchmark_returns[:min_len]
         
+        # Calculate Alpha and Beta
         if len(bench_returns) > 0 and np.var(bench_returns) > 1e-10:
             # Beta: covariance of strategy with benchmark / variance of benchmark
             beta = np.cov(strat_returns, bench_returns)[0, 1] / np.var(bench_returns)
@@ -467,6 +528,7 @@ def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_return
             mean_benchmark_return = np.mean(bench_returns)
             alpha = (mean_strategy_return - beta * mean_benchmark_return) * 252 * 100  # Annualized in %
     
+    # Return metrics
     return {
         'total_trades': len(trades),
         'win_rate': win_rate,
@@ -480,8 +542,10 @@ def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_return
         'beta': beta
     }
 
+# Main function
 if __name__ == "__main__":
     
+    # Print strategy parameters
     print(f"\nStrategy Parameters:")
     print(f"  Prediction Window: {PREDICTION_DAYS} days")
     print(f"  Minimum Edge Required: {MIN_CONFIDENCE*100:.1f}%")
@@ -490,32 +554,40 @@ if __name__ == "__main__":
     print(f"  Stop Loss: {STOP_LOSS_PCT*100:.1f}%")
     print(f"  Take Profit: {TAKE_PROFIT_PCT*100:.1f}%")
     
+    # Define trade symbols and benchmark
     TRADE_SYMBOLS = ['SPY', 'QQQ']
     BENCHMARK_SYMBOL = 'GSPC'
     
+    # Initialize results dictionary
     all_results = {}
     
+    # Train and test models for each symbol
     for symbol in TRADE_SYMBOLS:
         print(f"TRAINING AND TESTING: {symbol}")
         
+        # Load data
         csv_file = f'optidata/{symbol}_opti.csv'
         if not os.path.exists(csv_file):
             print(f"ERROR: {csv_file} not found! Skipping {symbol}")
             continue
         
+        # Prepare data
         data = pd.read_csv(csv_file)
         X, y, current_prices, future_prices = prepare_data(data, PREDICTION_DAYS)
     
+        # Print data summary
         print(f"Total samples: {len(X)}")
         print(f"Features: {X.shape[1]}")
         
-        # Split data
+        # Split data into training, validation, and test sets
         X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.20, shuffle=False)
         current_temp, current_test = current_prices[:-int(len(X)*0.20)], current_prices[-int(len(X)*0.20):]
         future_temp, future_test = future_prices[:-int(len(X)*0.20)], future_prices[-int(len(X)*0.20):]
         
+        # Split training data into training and validation
         X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.20, shuffle=False)
         
+        # Print data summary
         print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
         print(f"Class balance - UP: {np.sum(y_train == 1)/len(y_train)*100:.1f}%, DOWN: {np.sum(y_train == 0)/len(y_train)*100:.1f}%")
         
@@ -533,6 +605,7 @@ if __name__ == "__main__":
         # Train ensemble of models for this symbol
         print(f"\nTraining {N_MODELS} Models for {symbol}...")
         
+        # Train models
         models = []
         for i in range(N_MODELS):
             model = train_single_model(X_train_scaled, y_train, X_val_scaled, y_val, i, pos_weight, symbol)
@@ -541,6 +614,7 @@ if __name__ == "__main__":
         # Make predictions on test set
         print(f"\nMaking Ensemble Predictions for {symbol}...")
         
+        # Make predictions
         test_predictions = ensemble_predict(models, X_test_scaled)
         test_confidence = np.abs(test_predictions - 0.5) * 2
         
@@ -548,15 +622,18 @@ if __name__ == "__main__":
         pred_binary = (test_predictions > 0.5).astype(int)
         accuracy = np.mean(pred_binary == y_test) * 100
         
+        # Calculate high confidence accuracy
         bullish_mask = test_predictions >= MIN_CONFIDENCE
         bearish_mask = test_predictions <= (1 - MIN_CONFIDENCE)
         high_conf_mask = bullish_mask | bearish_mask
         
+        # Calculate high confidence accuracy
         if np.sum(high_conf_mask) > 0:
             high_conf_accuracy = np.mean(pred_binary[high_conf_mask] == y_test[high_conf_mask]) * 100
         else:
             high_conf_accuracy = 0
         
+        # Print accuracy metrics
         print(f"  Overall Accuracy: {accuracy:.2f}%")
         print(f"  Tradeable Signals: {np.sum(high_conf_mask)} ({np.sum(high_conf_mask)/len(test_predictions)*100:.1f}%)")
         print(f"  Tradeable Signal Accuracy: {high_conf_accuracy:.2f}%")
@@ -577,8 +654,10 @@ if __name__ == "__main__":
             if len(benchmark_prices) > 1:
                 benchmark_returns = np.diff(benchmark_prices) / benchmark_prices[:-1]
         
+        # Calculate metrics
         metrics = calculate_metrics(trades, equity_curve, daily_returns, benchmark_returns)
         
+        # Print metrics
         print(f"\n{'-'*60}")
         print(f"{symbol} PERFORMANCE")
         print(f"{'-'*60}")
@@ -586,14 +665,16 @@ if __name__ == "__main__":
         print(f"Total Return:       {metrics['return_pct']:.2f}%")
         print(f"CAGR:               {metrics['cagr']:.2f}%")
         print(f"Sharpe Ratio:       {metrics['sharpe_ratio']:.4f}")
-        print(f"Alpha (vs {BENCHMARK_SYMBOL}):    {metrics['alpha']:.2f}%")
-        print(f"Beta (vs {BENCHMARK_SYMBOL}):     {metrics['beta']:.4f}")
+        print(f"Alpha:              {metrics['alpha']:.2f}%")
+        print(f"Beta:               {metrics['beta']:.4f}")
         print(f"Max Drawdown:       {metrics['max_drawdown']:.2f}%")
         print(f"Total Trades:       {metrics['total_trades']}")
         print(f"Win Rate:           {metrics['win_rate']:.2f}%")
         
+        # Save metrics
         all_results[symbol] = metrics
         
+        # Save models
         import pickle
         model_dir = f'models/{symbol}'
         os.makedirs(model_dir, exist_ok=True)
@@ -602,27 +683,37 @@ if __name__ == "__main__":
         
         print(f"\nModels saved to '{model_dir}/' directory")
     
-    
+    # Print final results
+    print(f"\n{'-'*60}")
+    print(f"OVERALL PERFORMANCE")
+    print(f"{'-'*60}")
+
     print(f"BENCHMARK: {BENCHMARK_SYMBOL}")
     
+    # Load benchmark data
     benchmark_file = f'optidata/{BENCHMARK_SYMBOL}_opti.csv'
+
     if os.path.exists(benchmark_file):
         benchmark_data = pd.read_csv(benchmark_file)
         X_bench, y_bench, prices_bench, future_bench = prepare_data(benchmark_data, PREDICTION_DAYS)
         
+        # Split data into training, validation, and test sets
         test_size = int(len(X_bench) * 0.20)
         X_bench_test = X_bench[-test_size:]
         y_bench_test = y_bench[-test_size:]
         prices_bench_test = prices_bench[-test_size:]
         future_bench_test = future_bench[-test_size:]
         
+        # Calculate buy & hold metrics
         buy_hold_return = ((prices_bench_test[-1] - prices_bench_test[0]) / prices_bench_test[0]) * 100
         years = len(prices_bench_test) / 252
         buy_hold_cagr = ((prices_bench_test[-1] / prices_bench_test[0]) ** (1 / years) - 1) * 100 if years > 0 else 0
         
+        # Print buy & hold metrics
         print(f"Buy & Hold Return: {buy_hold_return:.2f}%")
         print(f"Buy & Hold CAGR:   {buy_hold_cagr:.2f}%")
         
+        # Save buy & hold metrics
         all_results[BENCHMARK_SYMBOL] = {
             'return_pct': buy_hold_return,
             'cagr': buy_hold_cagr,
