@@ -402,8 +402,8 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
     
     return trades, equity_curve, daily_returns
 
-def calculate_metrics(trades, equity_curve, daily_returns=None):
-    """Calculate performance metrics including Sharpe Ratio"""
+def calculate_metrics(trades, equity_curve, daily_returns=None, benchmark_returns=None):
+    """Calculate performance metrics including Sharpe Ratio, Alpha, and Beta"""
     equity_curve = np.array(equity_curve)
     
     if len(trades) == 0:
@@ -414,7 +414,9 @@ def calculate_metrics(trades, equity_curve, daily_returns=None):
             'sharpe_ratio': 0,
             'max_drawdown': 0,
             'return_pct': 0,
-            'final_capital': equity_curve[-1] if len(equity_curve) > 0 else INITIAL_CAPITAL
+            'final_capital': equity_curve[-1] if len(equity_curve) > 0 else INITIAL_CAPITAL,
+            'alpha': 0,
+            'beta': 0
         }
     
     total_profit = sum(t['profit'] for t in trades)
@@ -444,6 +446,27 @@ def calculate_metrics(trades, equity_curve, daily_returns=None):
     
     return_pct = (equity_curve[-1] - equity_curve[0]) / equity_curve[0] * 100
     
+    # Calculate Alpha and Beta relative to benchmark
+    alpha = 0
+    beta = 0
+    
+    if benchmark_returns is not None and len(benchmark_returns) > 0:
+        benchmark_returns = np.array(benchmark_returns)
+        # Align lengths
+        min_len = min(len(returns), len(benchmark_returns))
+        strat_returns = returns[:min_len]
+        bench_returns = benchmark_returns[:min_len]
+        
+        if len(bench_returns) > 0 and np.var(bench_returns) > 1e-10:
+            # Beta: covariance of strategy with benchmark / variance of benchmark
+            beta = np.cov(strat_returns, bench_returns)[0, 1] / np.var(bench_returns)
+            
+            # Alpha: annualized excess return over what beta predicts
+            # Alpha = (Strategy Return - Beta * Benchmark Return) annualized
+            mean_strategy_return = np.mean(strat_returns)
+            mean_benchmark_return = np.mean(bench_returns)
+            alpha = (mean_strategy_return - beta * mean_benchmark_return) * 252 * 100  # Annualized in %
+    
     return {
         'total_trades': len(trades),
         'win_rate': win_rate,
@@ -452,13 +475,12 @@ def calculate_metrics(trades, equity_curve, daily_returns=None):
         'cagr': cagr * 100,
         'max_drawdown': max_drawdown,
         'return_pct': return_pct,
-        'final_capital': equity_curve[-1]
+        'final_capital': equity_curve[-1],
+        'alpha': alpha,
+        'beta': beta
     }
 
 if __name__ == "__main__":
-    print("="*60)
-    print("SYMBOL-SPECIFIC TRADING STRATEGY")
-    print("="*60)
     
     print(f"\nStrategy Parameters:")
     print(f"  Prediction Window: {PREDICTION_DAYS} days")
@@ -467,9 +489,6 @@ if __name__ == "__main__":
     print(f"  Position Sizing: Kelly Criterion")
     print(f"  Stop Loss: {STOP_LOSS_PCT*100:.1f}%")
     print(f"  Take Profit: {TAKE_PROFIT_PCT*100:.1f}%")
-    print(f"  Ensemble Models per Symbol: {N_MODELS}")
-    print(f"  Trading Symbols: SPY, QQQ")
-    print(f"  Benchmark: GSPC (S&P 500 Index)")
     
     TRADE_SYMBOLS = ['SPY', 'QQQ']
     BENCHMARK_SYMBOL = 'GSPC'
@@ -477,9 +496,7 @@ if __name__ == "__main__":
     all_results = {}
     
     for symbol in TRADE_SYMBOLS:
-        print(f"\n{'='*60}")
         print(f"TRAINING AND TESTING: {symbol}")
-        print(f"{'='*60}")
         
         csv_file = f'optidata/{symbol}_opti.csv'
         if not os.path.exists(csv_file):
@@ -515,7 +532,6 @@ if __name__ == "__main__":
         
         # Train ensemble of models for this symbol
         print(f"\nTraining {N_MODELS} Models for {symbol}...")
-        print("-" * 60)
         
         models = []
         for i in range(N_MODELS):
@@ -524,7 +540,6 @@ if __name__ == "__main__":
     
         # Make predictions on test set
         print(f"\nMaking Ensemble Predictions for {symbol}...")
-        print("-" * 60)
         
         test_predictions = ensemble_predict(models, X_test_scaled)
         test_confidence = np.abs(test_predictions - 0.5) * 2
@@ -552,7 +567,17 @@ if __name__ == "__main__":
         trades, equity_curve, daily_returns = backtest_strategy(test_predictions, test_confidence, 
                                                                 current_test, future_test, PREDICTION_DAYS)
         
-        metrics = calculate_metrics(trades, equity_curve, daily_returns)
+        # Load benchmark returns for alpha/beta calculation
+        benchmark_returns = None
+        benchmark_file = f'optidata/{BENCHMARK_SYMBOL}_opti.csv'
+        if os.path.exists(benchmark_file):
+            benchmark_data = pd.read_csv(benchmark_file)
+            test_size = int(len(benchmark_data) * 0.20)
+            benchmark_prices = benchmark_data['close'].values[-test_size:]
+            if len(benchmark_prices) > 1:
+                benchmark_returns = np.diff(benchmark_prices) / benchmark_prices[:-1]
+        
+        metrics = calculate_metrics(trades, equity_curve, daily_returns, benchmark_returns)
         
         print(f"\n{'-'*60}")
         print(f"{symbol} PERFORMANCE")
@@ -561,6 +586,8 @@ if __name__ == "__main__":
         print(f"Total Return:       {metrics['return_pct']:.2f}%")
         print(f"CAGR:               {metrics['cagr']:.2f}%")
         print(f"Sharpe Ratio:       {metrics['sharpe_ratio']:.4f}")
+        print(f"Alpha (vs {BENCHMARK_SYMBOL}):    {metrics['alpha']:.2f}%")
+        print(f"Beta (vs {BENCHMARK_SYMBOL}):     {metrics['beta']:.4f}")
         print(f"Max Drawdown:       {metrics['max_drawdown']:.2f}%")
         print(f"Total Trades:       {metrics['total_trades']}")
         print(f"Win Rate:           {metrics['win_rate']:.2f}%")
@@ -576,9 +603,7 @@ if __name__ == "__main__":
         print(f"\nModels saved to '{model_dir}/' directory")
     
     
-    print(f"\n{'='*60}")
     print(f"BENCHMARK: {BENCHMARK_SYMBOL}")
-    print(f"{'='*60}")
     
     benchmark_file = f'optidata/{BENCHMARK_SYMBOL}_opti.csv'
     if os.path.exists(benchmark_file):
@@ -608,17 +633,17 @@ if __name__ == "__main__":
     print(f"\n{'='*60}")
     print("FINAL PERFORMANCE SUMMARY")
     print(f"{'='*60}")
-    print(f"\n{'Symbol':<10} {'Strategy':<15} {'Return':<12} {'CAGR':<12} {'Sharpe':<10} {'Win%':<10}")
-    print("-" * 70)
+    print(f"\n{'Symbol':<10} {'Strategy':<15} {'Return':<12} {'CAGR':<12} {'Sharpe':<10} {'Alpha':<10} {'Beta':<10} {'Win%':<10}")
+    print("-" * 90)
     
     for symbol in TRADE_SYMBOLS:
         if symbol in all_results:
             r = all_results[symbol]
-            print(f"{symbol:<10} {'ML Trading':<15} {r['return_pct']:>10.2f}% {r['cagr']:>10.2f}% {r['sharpe_ratio']:>9.4f} {r['win_rate']:>8.2f}%")
+            print(f"{symbol:<10} {'ML Trading':<15} {r['return_pct']:>10.2f}% {r['cagr']:>10.2f}% {r['sharpe_ratio']:>9.4f} {r['alpha']:>8.2f}% {r['beta']:>9.4f} {r['win_rate']:>8.2f}%")
     
     if BENCHMARK_SYMBOL in all_results:
         r = all_results[BENCHMARK_SYMBOL]
-        print(f"{BENCHMARK_SYMBOL:<10} {r['strategy']:<15} {r['return_pct']:>10.2f}% {r['cagr']:>10.2f}% {'N/A':<10} {'N/A':<10}")
+        print(f"{BENCHMARK_SYMBOL:<10} {r['strategy']:<15} {r['return_pct']:>10.2f}% {r['cagr']:>10.2f}% {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<10}")
     
     results_list = []
     for symbol, metrics in all_results.items():
@@ -628,8 +653,4 @@ if __name__ == "__main__":
     
     results_df = pd.DataFrame(results_list)
     results_df.to_csv('symbol_performance.csv', index=False)
-    
-    print(f"\n{'='*60}")
-    print("Training completed! Results saved to 'symbol_performance.csv'")
-    print(f"Models saved in 'models/SPY/' and 'models/QQQ/'")
-    print(f"{'='*60}")
+
