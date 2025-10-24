@@ -555,8 +555,14 @@ if __name__ == "__main__":
     print(f"  Take Profit: {TAKE_PROFIT_PCT*100:.1f}%")
     
     # Define trade symbols and benchmark
-    TRADE_SYMBOLS = ['SPY', 'QQQ']
-    BENCHMARK_SYMBOL = 'GSPC'
+    TRADE_SYMBOLS = [
+
+        'CSPX.L_2m','CSUS.L_2m','EQQQ.L_2m','IDTL.L_2m',
+        'IEEM.L_2m','IUES.L_2m','IUHC.L_2m','IUIT.L_2m',
+        'LQDE.L_2m','SGLN.L_2m','WFIN.L_2m'
+        ]
+    
+    BENCHMARK_SYMBOL = 'GSPC_2m'
     
     # Initialize results dictionary
     all_results = {}
