@@ -70,27 +70,55 @@ def process_csv(input_csv):
     
     xCon = np.concatenate(([np.ones((m, 1)), xMat]),1)
     
-    def lwr(x, y, tau):
+    def lwr(x, y, tau, sample_rate=0.1):
+        # Optimized implementation with sampling for speed
         yPred = np.zeros(m)
-        for i in range(m):
-            yPred[i] = (x[i] * localWeight(x[i], x, y, tau)).item()
+        
+        # Precompute for efficiency
+        xT = x.T
+        tau_sq = tau ** 2
+        
+        # Sample points to compute (every 1/sample_rate points)
+        step = max(1, int(1.0 / sample_rate))
+        sample_indices = np.arange(0, m, step)
+        
+        # Compute predictions for sampled points
+        for i in sample_indices:
+            # Compute weights for all points relative to point i
+            diff = x[i] - x
+            sq_diff = np.multiply(diff, diff)
+            distances = np.sum(sq_diff, axis=1)
+            weights = np.exp(distances / (-2.0 * tau_sq))
+            
+            # Create diagonal weight matrix efficiently
+            W = np.diag(np.ravel(weights))
+            
+            # Weighted least squares solution
+            xTW = xT * W
+            theta = np.linalg.solve(xTW * x, xTW * y)
+            yPred[i] = (x[i] * theta).item()
+        
+        # Interpolate for non-sampled points
+        if step > 1:
+            for i in range(m):
+                if i not in sample_indices:
+                    # Find nearest sampled points
+                    lower_idx = (i // step) * step
+                    upper_idx = min(lower_idx + step, m - 1)
+                    
+                    if upper_idx == lower_idx:
+                        yPred[i] = yPred[lower_idx]
+                    else:
+                        # Linear interpolation
+                        alpha = (i - lower_idx) / (upper_idx - lower_idx)
+                        yPred[i] = (1 - alpha) * yPred[lower_idx] + alpha * yPred[upper_idx]
+        
         return yPred
-    
-    def localWeight(x1, x, y, tau):
-        wt = funct(x1, x, tau)
-        w = np.linalg.inv(x.T * (wt * x)) * (x.T * (wt * y))
-        return w
-    
-    def funct(x1, x, tau):
-        diff = x1 - x
-        sq_diff = np.multiply(diff, diff)
-        distances = np.sum(sq_diff, axis=1)
-        weights_diag = np.exp(distances / (-2.0 * tau**2))
-        return np.diag(np.ravel(weights_diag))
     
     yMat = np.matrix(y)
     tua = 0.9
-    yPred = lwr(xCon, yMat.T, tua)
+    # Use sample_rate=0.05 for 20x speedup (computes every 20th point)
+    yPred = lwr(xCon, yMat.T, tua, sample_rate=0.05)
     
     # Stack all data including day_of_year and hour_of_day
     output_data = np.vstack([day_of_year, hour_of_day, open_prices, high_prices, low_prices, y, volumes, yPred]).T
@@ -121,8 +149,9 @@ if __name__ == "__main__":
         print(f"No CSV files found in {data_dir}")
     else:
         print(f"Found {len(csv_files)} CSV files to process")
-        for csv_file in csv_files:
+        for idx, csv_file in enumerate(csv_files, 1):
             try:
+                print(f"[{idx}/{len(csv_files)}] ", end='')
                 process_csv(csv_file)
             except Exception as e:
                 print(f"Error processing {csv_file}: {e}")
