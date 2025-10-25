@@ -54,9 +54,9 @@ def download_real_data(ticker="^GSPC", interval="4h", start_date="2024-01-01", e
 if __name__ == "__main__":
 
     # Change these values to control what you download
-    ticker = "^GSPC"#input('ticker: ')        # e.g., "QQQ", "SPY", "IWM", "^GSPC"
-    interval = "2m"           # options: "1m"(7d), "2m"(60d), "5m"(60d), "15m"(60d), "30m"(60d), "1h"(730d), "1d"(max)
-    start_date = "2025-09-01"  # Keep within 50-55 days for safety
+    ticker = "CSPX.L"#input('ticker: ')        # e.g., "QQQ", "SPY", "IWM", "^GSPC"
+    interval = "1h"           # options: "1m"(7d), "2m"(60d), "5m"(60d), "15m"(60d), "30m"(60d), "1h"(730d), "1d"(max)
+    start_date = "2023-10-27"
     end_date = "2025-10-23"
 
     download_real_data(ticker, interval, start_date, end_date)
