@@ -14,7 +14,8 @@ from nnScript import (
     backtest_strategy,
     calculate_metrics,
     MIN_CONFIDENCE,
-    PREDICTION_DAYS,
+    PREDICTION_CANDLES,
+    INPUT_WINDOW,
     N_MODELS,
     device,
 )
@@ -91,7 +92,7 @@ def main():
     print(f'Using symbol: {symbol}')
 
     data = pd.read_csv(csv_path)
-    X, y, current_prices, future_prices = prepare_data(data, PREDICTION_DAYS)
+    X, y, current_prices, future_prices = prepare_data(data, PREDICTION_CANDLES, INPUT_WINDOW)
 
     X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.20, shuffle=False)
     current_temp, current_test = current_prices[:-int(len(X)*0.20)], current_prices[-int(len(X)*0.20):]
@@ -99,10 +100,19 @@ def main():
 
     X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.20, shuffle=False)
 
+    # Scale features (reshape for StandardScaler, then reshape back)
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_test_scaled = scaler.transform(X_test)
+    n_samples, n_timesteps, n_features = X_train.shape
+    X_train_reshaped = X_train.reshape(-1, n_features)
+    X_train_scaled_flat = scaler.fit_transform(X_train_reshaped)
+    X_train_scaled = X_train_scaled_flat.reshape(n_samples, n_timesteps, n_features)
+    
+    # Scale validation and test sets
+    X_val_reshaped = X_val.reshape(-1, n_features)
+    X_val_scaled = scaler.transform(X_val_reshaped).reshape(X_val.shape[0], n_timesteps, n_features)
+    
+    X_test_reshaped = X_test.reshape(-1, n_features)
+    X_test_scaled = scaler.transform(X_test_reshaped).reshape(X_test.shape[0], n_timesteps, n_features)
 
     pos_count = np.sum(y_train == 1)
     neg_count = np.sum(y_train == 0)
@@ -123,9 +133,11 @@ def main():
         try:
             with open(os.path.join(model_dir, 'scaler.pkl'), 'rb') as f:
                 scaler = pickle.load(f)
-            X_train_scaled = scaler.transform(X_train)
-            X_val_scaled = scaler.transform(X_val)
-            X_test_scaled = scaler.transform(X_test)
+            # Re-scale with loaded scaler
+            n_samples, n_timesteps, n_features = X_train.shape
+            X_train_scaled = scaler.transform(X_train.reshape(-1, n_features)).reshape(n_samples, n_timesteps, n_features)
+            X_val_scaled = scaler.transform(X_val.reshape(-1, n_features)).reshape(X_val.shape[0], n_timesteps, n_features)
+            X_test_scaled = scaler.transform(X_test.reshape(-1, n_features)).reshape(X_test.shape[0], n_timesteps, n_features)
         except Exception:
             pass
         models, _ = load_trained_models(symbol)
@@ -162,7 +174,7 @@ def main():
     print(f'  Tradeable Signal Accuracy: {high_conf_accuracy:.2f}%')
 
     trades, equity_curve, daily_returns = backtest_strategy(
-        test_predictions, test_confidence, current_test, future_test, PREDICTION_DAYS
+        test_predictions, test_confidence, current_test, future_test, PREDICTION_CANDLES
     )
 
     metrics = calculate_metrics(trades, equity_curve, daily_returns)

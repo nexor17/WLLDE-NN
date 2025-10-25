@@ -16,22 +16,22 @@ import glob
 
 # Hyperparameters
 LEARNING_RATE = 0.001
-EPOCHS = 400
+EPOCHS = 500
 BATCH_SIZE = 64
-EARLY_STOPPING_PATIENCE = 80
+EARLY_STOPPING_PATIENCE = 60
 WEIGHT_DECAY = 0.00005
-DROPOUT = 0.3
-N_MODELS = 7
-PREDICTION_HOURS = 6
-INPUT_WINDOW = 24
-MIN_CONFIDENCE = 0.53 
+DROPOUT = 0.2
+N_MODELS = 10
+PREDICTION_CANDLES = 6
+INPUT_WINDOW = 72
+MIN_CONFIDENCE = 0.55
 
 # Portfolio Management
-INITIAL_CAPITAL = 100000
-MAX_POSITION_SIZE = 0.65 
+INITIAL_CAPITAL = 10000
+MAX_POSITION_SIZE = 0.75 
 MAX_TOTAL_EXPOSURE = 2.5 
-STOP_LOSS_PCT = 0.018   
-TAKE_PROFIT_PCT = 0.09 
+STOP_LOSS_PCT = 0.09   
+TAKE_PROFIT_PCT = 0.018
 TRAILING_STOP = True
 TRAILING_STOP_PCT = 0.015 
 USE_KELLY = True
@@ -45,30 +45,30 @@ print(f"Using device: {device}")
 
 # Model
 class PricePredictor(nn.Module):
-    # 2-Layer LSTM with MultiheadAttention (optimized for 6h prediction)
-    def __init__(self, input_size, dropout=0.3, hidden_size=128):
+    # LSTM with MultiheadAttention (optimized for 6h prediction)
+    def __init__(self, input_size, dropout=0.3, hidden_size=256):
         # Initialize the model
         super(PricePredictor, self).__init__()
         
         self.hidden_size = hidden_size
         
-        # 2-layer LSTM for temporal feature extraction
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, 
+        # LSTM for temporal feature extraction
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=4, 
                             batch_first=True, dropout=dropout)
         
         # Multihead attention to focus on key hours
-        self.attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=4, 
+        self.attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=8, 
                                                dropout=dropout, batch_first=True)
         
         # Streamlined fully connected layers
-        self.fc1 = nn.Linear(hidden_size, 64)
-        self.fc2 = nn.Linear(64, 1)
+        self.fc1 = nn.Linear(hidden_size, 128)
+        self.fc2 = nn.Linear(128, 1)
         
         # Activation functions and dropout
         self.relu = nn.ReLU()
         self.leaky_relu = nn.LeakyReLU(0.1)
         self.dropout = nn.Dropout(dropout)
-        self.batch_norm1 = nn.BatchNorm1d(64)
+        self.batch_norm1 = nn.BatchNorm1d(128)
     # Forward pass with attention mechanism
     def forward(self, x):
         # Ensure 3D input: (batch, sequence, features)
@@ -117,7 +117,7 @@ def load_data(data_folder='optidata'):
     return data, csv_files
 
 # Data Preparation with Sequence Creation for LSTM
-def prepare_data(data, prediction_hours=6, input_window=24):
+def prepare_data(data, prediction_candles=6, input_window=24):
     
     # Feature columns
     feature_columns = ['dayoftheyear', 'houroftheday', 'open', 'high', 'low', 'close', 'volume', 'WLLDE']
@@ -178,7 +178,7 @@ def prepare_data(data, prediction_hours=6, input_window=24):
     data['dist_from_ma14'] = ((data['close'] - data['close_ma14']) / data['close_ma14']) * 100
     
     # Fill NaN
-    data.fillna(method='bfill', inplace=True)
+    data.bfill(inplace=True)
     data.fillna(0, inplace=True)
     
     # Extended features (now includes volume indicators)
@@ -190,18 +190,8 @@ def prepare_data(data, prediction_hours=6, input_window=24):
                                            'volume_ma7', 'volume_ma14', 'volume_ma21', 'volume_ratio', 
                                            'volume_momentum', 'volume_volatility', 'vwap', 'obv', 'obv_ma']
     
-    # Features and labels
-    X = data[extended_features].values[:-prediction_days]
-    current_close = data['close'].values[:-prediction_days]
-    future_close = data['close'].values[prediction_days:]
+    print(f"Extended features: {extended_features}")
     
-    y = (future_close > current_close).astype(np.float32)
-    
-    actual_prices = data[['close']].values[:-prediction_days]
-    future_prices = data[['close']].values[prediction_days:]
-    
-    return X, y, current_close, future_prices.flatten()
-   
     # Create sequences for LSTM (input_window hours of history)
     feature_data = data[extended_features].values
     close_prices = data['close'].values
@@ -212,13 +202,13 @@ def prepare_data(data, prediction_hours=6, input_window=24):
     future_prices_list = []
     
     # Create sliding windows
-    for i in range(input_window, len(feature_data) - prediction_hours):
+    for i in range(input_window, len(feature_data) - prediction_candles):
         # Input: past input_window hours
         X_sequences.append(feature_data[i-input_window:i])
         
-        # Label: will price go up in prediction_hours?
+        # Label: will price go up in prediction_candles?
         current_price = close_prices[i]
-        future_price = close_prices[i + prediction_hours]
+        future_price = close_prices[i + prediction_candles]
         
         y_labels.append(1.0 if future_price > current_price else 0.0)
         current_prices.append(current_price)
@@ -254,7 +244,7 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
     
     # Initialize scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', 
-                                                      factor=0.5, patience=15, verbose=False)
+                                                      factor=0.5, patience=15)
     
     # Initialize variables
     best_val_loss = float('inf')
@@ -370,7 +360,7 @@ def kelly_criterion(win_prob, win_loss_ratio, max_fraction=0.60, multiplier=1.5)
     return max(0, min(kelly_fraction, max_fraction))
 
 # Backtest strategy
-def backtest_strategy(predictions, confidence, current_prices, future_prices, prediction_days):
+def backtest_strategy(predictions, confidence, current_prices, future_prices, prediction_candles):
     """
     multi-position strategy with leverage and compounding
     """
@@ -417,7 +407,7 @@ def backtest_strategy(predictions, confidence, current_prices, future_prices, pr
             elif pnl_pct >= TAKE_PROFIT_PCT:
                 close_position = True
                 exit_type = 'take_profit'
-            elif i >= pos['entry_index'] + prediction_days:
+            elif i >= pos['entry_index'] + prediction_candles:
                 close_position = True
                 exit_type = 'time_exit'
             
@@ -594,7 +584,7 @@ if __name__ == "__main__":
     
     # Print strategy parameters
     print(f"\nStrategy Parameters:")
-    print(f"  Prediction Window: {PREDICTION_DAYS} days")
+    print(f"  Prediction Window: {PREDICTION_CANDLES} candles")
     print(f"  Minimum Edge Required: {MIN_CONFIDENCE*100:.1f}%")
     print(f"  Max Position Size: {MAX_POSITION_SIZE*100:.1f}% of capital")
     print(f"  Position Sizing: Kelly Criterion")
@@ -625,7 +615,7 @@ if __name__ == "__main__":
         
         # Prepare data
         data = pd.read_csv(csv_file)
-        X, y, current_prices, future_prices = prepare_data(data, PREDICTION_HOURS, INPUT_WINDOW)
+        X, y, current_prices, future_prices = prepare_data(data, PREDICTION_CANDLES, INPUT_WINDOW)
     
         # Print data summary
         print(f"Total samples: {len(X)}")
@@ -702,7 +692,7 @@ if __name__ == "__main__":
         print(f"\nBacktesting {symbol}...")
         
         trades, equity_curve, daily_returns = backtest_strategy(test_predictions, test_confidence, 
-                                                                current_test, future_test, PREDICTION_DAYS)
+                                                                current_test, future_test, PREDICTION_CANDLES)
         
         # Load benchmark returns for alpha/beta calculation
         benchmark_returns = None
@@ -755,7 +745,7 @@ if __name__ == "__main__":
 
     if os.path.exists(benchmark_file):
         benchmark_data = pd.read_csv(benchmark_file)
-        X_bench, y_bench, prices_bench, future_bench = prepare_data(benchmark_data, PREDICTION_HOURS, INPUT_WINDOW)
+        X_bench, y_bench, prices_bench, future_bench = prepare_data(benchmark_data, PREDICTION_CANDLES, INPUT_WINDOW)
         
         # Split data into training, validation, and test sets
         test_size = int(len(X_bench) * 0.20)
