@@ -2,14 +2,6 @@
 # Predicts 6-hour price movements with ensemble LSTM+Attention models
 # Only trades when confidence is high
 # Includes proper risk management and position sizing
-#
-# MODEL ARCHITECTURE:
-# - Input: 24-hour sequences of 25+ features (OHLCV + technical indicators)
-# - 2-Layer LSTM (hidden_size=128) for temporal feature extraction
-# - MultiheadAttention (4 heads) to focus on key timesteps
-# - FC layers: 128 → 64 → 1 (with BatchNorm, LeakyReLU, Dropout)
-# - Output: Binary classification (price up/down in 6 hours)
-# - Ensemble: 7 models averaged for robust predictions
 
 import torch
 import torch.nn as nn
@@ -30,8 +22,8 @@ EARLY_STOPPING_PATIENCE = 80
 WEIGHT_DECAY = 0.00005
 DROPOUT = 0.3
 N_MODELS = 7
-PREDICTION_HOURS = 6      # Predict 6 hours ahead
-INPUT_WINDOW = 24         # Use past 24 hours as input
+PREDICTION_HOURS = 6
+INPUT_WINDOW = 24
 MIN_CONFIDENCE = 0.53 
 
 # Portfolio Management
@@ -47,7 +39,7 @@ COMPOUND_RETURNS = True
 KELLY_MULTIPLIER = 1.7 
 MIN_POSITION_SIZE = 0.08 
 
-# check to use amd gpu
+# check to use NVDIA gpu
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
@@ -126,8 +118,9 @@ def load_data(data_folder='optidata'):
 
 # Data Preparation with Sequence Creation for LSTM
 def prepare_data(data, prediction_hours=6, input_window=24):
-    # Feature columns (including houroftheday for hourly data)
-    feature_columns = ['dayoftheyear', 'houroftheday', 'open', 'high', 'low', 'close', 'WLLDE']
+    
+    # Feature columns
+    feature_columns = ['dayoftheyear', 'houroftheday', 'open', 'high', 'low', 'close', 'volume', 'WLLDE']
     
     # Technical indicators
     data['pct_change'] = data['close'].pct_change() * 100
@@ -135,11 +128,26 @@ def prepare_data(data, prediction_hours=6, input_window=24):
     data['open_close_diff'] = ((data['close'] - data['open']) / data['open']) * 100
     data['price_momentum'] = data['close'].diff()
     
-    # Moving averages (adjusted for hourly data)
+    # Volume-based indicators
+    data['volume_ma7'] = data['volume'].rolling(window=7, min_periods=1).mean()
+    data['volume_ma14'] = data['volume'].rolling(window=14, min_periods=1).mean()
+    data['volume_ma21'] = data['volume'].rolling(window=21, min_periods=1).mean()
+    data['volume_ratio'] = data['volume'] / (data['volume_ma7'] + 1e-10)
+    data['volume_momentum'] = data['volume'].diff()
+    data['volume_volatility'] = data['volume'].rolling(window=5, min_periods=1).std()
+    
+    # Price-Volume indicators
+    data['price_volume'] = data['close'] * data['volume']
+    data['vwap'] = (data['price_volume'].rolling(window=14, min_periods=1).sum() / 
+                    data['volume'].rolling(window=14, min_periods=1).sum())
+    data['obv'] = (np.sign(data['close'].diff()) * data['volume']).fillna(0).cumsum()
+    data['obv_ma'] = data['obv'].rolling(window=14, min_periods=1).mean()
+    
+    # Moving averages
     data['close_ma3'] = data['close'].rolling(window=3, min_periods=1).mean()
-    data['close_ma6'] = data['close'].rolling(window=6, min_periods=1).mean()
-    data['close_ma12'] = data['close'].rolling(window=12, min_periods=1).mean()
-    data['close_ma24'] = data['close'].rolling(window=24, min_periods=1).mean()
+    data['close_ma7'] = data['close'].rolling(window=7, min_periods=1).mean()
+    data['close_ma14'] = data['close'].rolling(window=14, min_periods=1).mean()
+    data['close_ma21'] = data['close'].rolling(window=21, min_periods=1).mean()
     
     # RSI
     delta = data['close'].diff()
@@ -166,20 +174,34 @@ def prepare_data(data, prediction_hours=6, input_window=24):
     # Volatility
     data['volatility'] = data['close'].rolling(window=5, min_periods=1).std()
     data['volatility_ratio'] = data['volatility'] / data['close']
-    data['dist_from_ma6'] = ((data['close'] - data['close_ma6']) / data['close_ma6']) * 100
-    data['dist_from_ma12'] = ((data['close'] - data['close_ma12']) / data['close_ma12']) * 100
+    data['dist_from_ma7'] = ((data['close'] - data['close_ma7']) / data['close_ma7']) * 100
+    data['dist_from_ma14'] = ((data['close'] - data['close_ma14']) / data['close_ma14']) * 100
     
     # Fill NaN
     data.fillna(method='bfill', inplace=True)
     data.fillna(0, inplace=True)
     
-    # Extended features
+    # Extended features (now includes volume indicators)
     extended_features = feature_columns + ['pct_change', 'high_low_range', 'open_close_diff', 
-                                           'price_momentum', 'close_ma3', 'close_ma6', 'close_ma12', 'close_ma24',
+                                           'price_momentum', 'close_ma3', 'close_ma7', 'close_ma14', 'close_ma21',
                                            'rsi', 'macd', 'macd_signal', 'macd_hist',
                                            'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_position',
-                                           'volatility', 'volatility_ratio', 'dist_from_ma6', 'dist_from_ma12']
+                                           'volatility', 'volatility_ratio', 'dist_from_ma7', 'dist_from_ma14',
+                                           'volume_ma7', 'volume_ma14', 'volume_ma21', 'volume_ratio', 
+                                           'volume_momentum', 'volume_volatility', 'vwap', 'obv', 'obv_ma']
     
+    # Features and labels
+    X = data[extended_features].values[:-prediction_days]
+    current_close = data['close'].values[:-prediction_days]
+    future_close = data['close'].values[prediction_days:]
+    
+    y = (future_close > current_close).astype(np.float32)
+    
+    actual_prices = data[['close']].values[:-prediction_days]
+    future_prices = data[['close']].values[prediction_days:]
+    
+    return X, y, current_close, future_prices.flatten()
+   
     # Create sequences for LSTM (input_window hours of history)
     feature_data = data[extended_features].values
     close_prices = data['close'].values
@@ -582,12 +604,11 @@ if __name__ == "__main__":
     # Define trade symbols and benchmark
     TRADE_SYMBOLS = [
 
-        'CSPX.L_2m','CSUS.L_2m','EQQQ.L_2m','IDTL.L_2m',
-        'IEEM.L_2m','IUES.L_2m','IUHC.L_2m','IUIT.L_2m',
-        'LQDE.L_2m','SGLN.L_2m','WFIN.L_2m'
+        'CSPX_L_1h','CSUS_L_1h','EQQQ_L_1h',
+        'IUIT_L_1h', 'SGLN_L_1h'
         ]
     
-    BENCHMARK_SYMBOL = 'GSPC_2m'
+    BENCHMARK_SYMBOL = 'GSPC_1h'
     
     # Initialize results dictionary
     all_results = {}
