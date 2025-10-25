@@ -15,15 +15,15 @@ import os
 import glob
 
 # Hyperparameters
-LEARNING_RATE = 0.0005 
-EPOCHS = 300 
-BATCH_SIZE = 128 
-EARLY_STOPPING_PATIENCE = 40 
-WEIGHT_DECAY = 0.00005 
-DROPOUT = 0.3 
-N_MODELS = 7 
-PREDICTION_DAYS = 2 
-MIN_CONFIDENCE = 0.53 
+LEARNING_RATE = 0.0002    
+EPOCHS = 500
+BATCH_SIZE = 64
+EARLY_STOPPING_PATIENCE = 120
+WEIGHT_DECAY = 0.0001
+DROPOUT = 0.35
+N_MODELS = 17
+PREDICTION_DAYS = 3
+MIN_CONFIDENCE = 0.65
 
 # Portfolio Management
 INITIAL_CAPITAL = 100000
@@ -38,7 +38,7 @@ COMPOUND_RETURNS = True
 KELLY_MULTIPLIER = 1.7 
 MIN_POSITION_SIZE = 0.08 
 
-# check to use amd gpu
+# check to use NVDIA gpu
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
@@ -55,18 +55,18 @@ class PricePredictor(nn.Module):
         self.attention = nn.Linear(hidden_size, 1)
         
         # Fully connected layers
-        self.fc1 = nn.Linear(hidden_size, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 64)
-        self.fc4 = nn.Linear(64, 1)
+        self.fc1 = nn.Linear(hidden_size, 2048)
+        self.fc2 = nn.Linear(2048, 1024)
+        self.fc3 = nn.Linear(1024, 512)
+        self.fc4 = nn.Linear(512, 1)
         
         # Activation functions and dropout
         self.relu = nn.ReLU()
         self.leaky_relu = nn.LeakyReLU(0.1)
         self.dropout = nn.Dropout(dropout)
-        self.batch_norm1 = nn.BatchNorm1d(256)
-        self.batch_norm2 = nn.BatchNorm1d(128)
-        self.batch_norm3 = nn.BatchNorm1d(64)
+        self.batch_norm1 = nn.BatchNorm1d(2048)
+        self.batch_norm2 = nn.BatchNorm1d(1024)
+        self.batch_norm3 = nn.BatchNorm1d(512)
     # Forward pass 
     def forward(self, x):
         if len(x.shape) == 2:
@@ -119,13 +119,28 @@ def load_data(data_folder='optidata'):
 # Data Preparation
 def prepare_data(data, prediction_days=3):
     # Feature columns
-    feature_columns = ['dayoftheyear', 'open', 'high', 'low', 'close', 'WLLDE']
+    feature_columns = ['dayoftheyear', 'houroftheday', 'open', 'high', 'low', 'close', 'volume', 'WLLDE']
     
     # Technical indicators
     data['pct_change'] = data['close'].pct_change() * 100
     data['high_low_range'] = ((data['high'] - data['low']) / data['close']) * 100
     data['open_close_diff'] = ((data['close'] - data['open']) / data['open']) * 100
     data['price_momentum'] = data['close'].diff()
+    
+    # Volume-based indicators
+    data['volume_ma7'] = data['volume'].rolling(window=7, min_periods=1).mean()
+    data['volume_ma14'] = data['volume'].rolling(window=14, min_periods=1).mean()
+    data['volume_ma21'] = data['volume'].rolling(window=21, min_periods=1).mean()
+    data['volume_ratio'] = data['volume'] / (data['volume_ma7'] + 1e-10)
+    data['volume_momentum'] = data['volume'].diff()
+    data['volume_volatility'] = data['volume'].rolling(window=5, min_periods=1).std()
+    
+    # Price-Volume indicators
+    data['price_volume'] = data['close'] * data['volume']
+    data['vwap'] = (data['price_volume'].rolling(window=14, min_periods=1).sum() / 
+                    data['volume'].rolling(window=14, min_periods=1).sum())
+    data['obv'] = (np.sign(data['close'].diff()) * data['volume']).fillna(0).cumsum()
+    data['obv_ma'] = data['obv'].rolling(window=14, min_periods=1).mean()
     
     # Moving averages
     data['close_ma3'] = data['close'].rolling(window=3, min_periods=1).mean()
@@ -165,12 +180,14 @@ def prepare_data(data, prediction_days=3):
     data.fillna(method='bfill', inplace=True)
     data.fillna(0, inplace=True)
     
-    # Extended features
+    # Extended features (now includes volume indicators)
     extended_features = feature_columns + ['pct_change', 'high_low_range', 'open_close_diff', 
                                            'price_momentum', 'close_ma3', 'close_ma7', 'close_ma14', 'close_ma21',
                                            'rsi', 'macd', 'macd_signal', 'macd_hist',
                                            'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_position',
-                                           'volatility', 'volatility_ratio', 'dist_from_ma7', 'dist_from_ma14']
+                                           'volatility', 'volatility_ratio', 'dist_from_ma7', 'dist_from_ma14',
+                                           'volume_ma7', 'volume_ma14', 'volume_ma21', 'volume_ratio', 
+                                           'volume_momentum', 'volume_volatility', 'vwap', 'obv', 'obv_ma']
     
     # Features and labels
     X = data[extended_features].values[:-prediction_days]
