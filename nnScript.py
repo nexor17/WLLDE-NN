@@ -1,5 +1,5 @@
 # Trading Strategy with High Sharpe Ratio
-# Predicts 3-day price movements with ensemble models
+# Predicts 6-hour price movements with ensemble LSTM+Attention models
 # Only trades when confidence is high
 # Includes proper risk management and position sizing
 
@@ -15,15 +15,16 @@ import os
 import glob
 
 # Hyperparameters
-LEARNING_RATE = 0.0002    
-EPOCHS = 500
+LEARNING_RATE = 0.001
+EPOCHS = 400
 BATCH_SIZE = 64
-EARLY_STOPPING_PATIENCE = 120
-WEIGHT_DECAY = 0.0001
-DROPOUT = 0.35
-N_MODELS = 17
-PREDICTION_DAYS = 3
-MIN_CONFIDENCE = 0.65
+EARLY_STOPPING_PATIENCE = 80
+WEIGHT_DECAY = 0.00005
+DROPOUT = 0.3
+N_MODELS = 7
+PREDICTION_HOURS = 6
+INPUT_WINDOW = 24
+MIN_CONFIDENCE = 0.53 
 
 # Portfolio Management
 INITIAL_CAPITAL = 100000
@@ -44,53 +45,52 @@ print(f"Using device: {device}")
 
 # Model
 class PricePredictor(nn.Module):
-    # LSTM with attention
-    def __init__(self, input_size, dropout=0.3, hidden_size=256):
+    # 2-Layer LSTM with MultiheadAttention (optimized for 6h prediction)
+    def __init__(self, input_size, dropout=0.3, hidden_size=128):
         # Initialize the model
         super(PricePredictor, self).__init__()
         
+        self.hidden_size = hidden_size
+        
+        # 2-layer LSTM for temporal feature extraction
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=2, 
                             batch_first=True, dropout=dropout)
         
-        self.attention = nn.Linear(hidden_size, 1)
+        # Multihead attention to focus on key hours
+        self.attention = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=4, 
+                                               dropout=dropout, batch_first=True)
         
-        # Fully connected layers
-        self.fc1 = nn.Linear(hidden_size, 2048)
-        self.fc2 = nn.Linear(2048, 1024)
-        self.fc3 = nn.Linear(1024, 512)
-        self.fc4 = nn.Linear(512, 1)
+        # Streamlined fully connected layers
+        self.fc1 = nn.Linear(hidden_size, 64)
+        self.fc2 = nn.Linear(64, 1)
         
         # Activation functions and dropout
         self.relu = nn.ReLU()
         self.leaky_relu = nn.LeakyReLU(0.1)
         self.dropout = nn.Dropout(dropout)
-        self.batch_norm1 = nn.BatchNorm1d(2048)
-        self.batch_norm2 = nn.BatchNorm1d(1024)
-        self.batch_norm3 = nn.BatchNorm1d(512)
-    # Forward pass 
+        self.batch_norm1 = nn.BatchNorm1d(64)
+    # Forward pass with attention mechanism
     def forward(self, x):
+        # Ensure 3D input: (batch, sequence, features)
         if len(x.shape) == 2:
-            x = x.unsqueeze(1)  
+            x = x.unsqueeze(1)
         
-        lstm_out, _ = self.lstm(x)
-        lstm_out = lstm_out[:, -1, :] 
+        # LSTM layers for temporal dependencies
+        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_size)
         
-        x = self.fc1(lstm_out)
+        # Multihead attention to focus on important timesteps
+        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+        
+        # Use last timestep output after attention
+        x = attn_out[:, -1, :]  # (batch, hidden_size)
+        
+        # FC layers for final prediction
+        x = self.fc1(x)
         x = self.batch_norm1(x)
         x = self.leaky_relu(x)
         x = self.dropout(x)
         
         x = self.fc2(x)
-        x = self.batch_norm2(x)
-        x = self.leaky_relu(x)
-        x = self.dropout(x)
-        
-        x = self.fc3(x)
-        x = self.batch_norm3(x)
-        x = self.leaky_relu(x)
-        x = self.dropout(x)
-        
-        x = self.fc4(x)
         return x
 
 # Data Loading
@@ -116,8 +116,9 @@ def load_data(data_folder='optidata'):
     data = pd.concat(all_data, ignore_index=True)
     return data, csv_files
 
-# Data Preparation
-def prepare_data(data, prediction_days=3):
+# Data Preparation with Sequence Creation for LSTM
+def prepare_data(data, prediction_hours=6, input_window=24):
+    
     # Feature columns
     feature_columns = ['dayoftheyear', 'houroftheday', 'open', 'high', 'low', 'close', 'volume', 'WLLDE']
     
@@ -200,6 +201,35 @@ def prepare_data(data, prediction_days=3):
     future_prices = data[['close']].values[prediction_days:]
     
     return X, y, current_close, future_prices.flatten()
+   
+    # Create sequences for LSTM (input_window hours of history)
+    feature_data = data[extended_features].values
+    close_prices = data['close'].values
+    
+    X_sequences = []
+    y_labels = []
+    current_prices = []
+    future_prices_list = []
+    
+    # Create sliding windows
+    for i in range(input_window, len(feature_data) - prediction_hours):
+        # Input: past input_window hours
+        X_sequences.append(feature_data[i-input_window:i])
+        
+        # Label: will price go up in prediction_hours?
+        current_price = close_prices[i]
+        future_price = close_prices[i + prediction_hours]
+        
+        y_labels.append(1.0 if future_price > current_price else 0.0)
+        current_prices.append(current_price)
+        future_prices_list.append(future_price)
+    
+    X = np.array(X_sequences, dtype=np.float32)
+    y = np.array(y_labels, dtype=np.float32)
+    current_close = np.array(current_prices, dtype=np.float32)
+    future_prices = np.array(future_prices_list, dtype=np.float32)
+    
+    return X, y, current_close, future_prices
 
 # Model Training
 def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, symbol):
@@ -217,8 +247,8 @@ def train_single_model(X_train, y_train, X_val, y_val, model_id, pos_weight, sym
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    # Initialize model
-    model = PricePredictor(input_size=X_train.shape[1], dropout=DROPOUT).to(device)
+    # Initialize model (input_size is the number of features, not timesteps)
+    model = PricePredictor(input_size=X_train.shape[2], dropout=DROPOUT).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
@@ -574,12 +604,11 @@ if __name__ == "__main__":
     # Define trade symbols and benchmark
     TRADE_SYMBOLS = [
 
-        'CSPX.L_2m','CSUS.L_2m','EQQQ.L_2m','IDTL.L_2m',
-        'IEEM.L_2m','IUES.L_2m','IUHC.L_2m','IUIT.L_2m',
-        'LQDE.L_2m','SGLN.L_2m','WFIN.L_2m'
+        'CSPX_L_1h','CSUS_L_1h','EQQQ_L_1h',
+        'IUIT_L_1h', 'SGLN_L_1h'
         ]
     
-    BENCHMARK_SYMBOL = 'GSPC_2m'
+    BENCHMARK_SYMBOL = 'GSPC_1h'
     
     # Initialize results dictionary
     all_results = {}
@@ -596,11 +625,11 @@ if __name__ == "__main__":
         
         # Prepare data
         data = pd.read_csv(csv_file)
-        X, y, current_prices, future_prices = prepare_data(data, PREDICTION_DAYS)
+        X, y, current_prices, future_prices = prepare_data(data, PREDICTION_HOURS, INPUT_WINDOW)
     
         # Print data summary
         print(f"Total samples: {len(X)}")
-        print(f"Features: {X.shape[1]}")
+        print(f"Sequence shape: {X.shape} (samples, timesteps, features)")
         
         # Split data into training, validation, and test sets
         X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.20, shuffle=False)
@@ -614,11 +643,19 @@ if __name__ == "__main__":
         print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
         print(f"Class balance - UP: {np.sum(y_train == 1)/len(y_train)*100:.1f}%, DOWN: {np.sum(y_train == 0)/len(y_train)*100:.1f}%")
         
-        # Scale features
+        # Scale features (reshape for StandardScaler, then reshape back)
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
-        X_test_scaled = scaler.transform(X_test)
+        n_samples, n_timesteps, n_features = X_train.shape
+        X_train_reshaped = X_train.reshape(-1, n_features)
+        X_train_scaled_flat = scaler.fit_transform(X_train_reshaped)
+        X_train_scaled = X_train_scaled_flat.reshape(n_samples, n_timesteps, n_features)
+        
+        # Scale validation and test sets
+        X_val_reshaped = X_val.reshape(-1, n_features)
+        X_val_scaled = scaler.transform(X_val_reshaped).reshape(X_val.shape[0], n_timesteps, n_features)
+        
+        X_test_reshaped = X_test.reshape(-1, n_features)
+        X_test_scaled = scaler.transform(X_test_reshaped).reshape(X_test.shape[0], n_timesteps, n_features)
     
         # Calculate class weights
         pos_count = np.sum(y_train == 1)
@@ -718,7 +755,7 @@ if __name__ == "__main__":
 
     if os.path.exists(benchmark_file):
         benchmark_data = pd.read_csv(benchmark_file)
-        X_bench, y_bench, prices_bench, future_bench = prepare_data(benchmark_data, PREDICTION_DAYS)
+        X_bench, y_bench, prices_bench, future_bench = prepare_data(benchmark_data, PREDICTION_HOURS, INPUT_WINDOW)
         
         # Split data into training, validation, and test sets
         test_size = int(len(X_bench) * 0.20)
